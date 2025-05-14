@@ -1,0 +1,589 @@
+---
+title: "Многомерный анализ данных"
+output:
+  github_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, dpi = 300, fig.width = 10, fig.path = "img/")
+```
+
+```{r, message=FALSE}
+# Подключаем необходимые библиотеки
+library(dplyr)
+library(heplots)
+library(FactoMineR)
+library(factoextra)
+library(GGally)
+library(ggrepel)
+library(psych)
+library(GPArotation)
+library(MVN)
+library(candisc)
+library(MASS)
+library(pROC)
+library(cluster)
+library(dendextend)
+library(mclust)
+library(Spectrum)
+```
+
+
+# Описание данных
+Для анализа будем использовать данные Ривена и Миллера (1979), которые исследовали взаимосвязь между показателями толерантности к глюкозе и инсулина в биохимическом анализе крови у $145$ взрослых, не страдающих ожирением. Их исследование оказало влияние на определение стадий развития сахарного диабета $2$-го типа. Явный сахарный диабет --- это наиболее запущенная стадия, характеризующаяся повышенной концентрацией глюкозы в крови натощак и классическими симптомами. Предшествует явному диабету латентная (скрытая) стадия диабета, при которой симптомы диабета отсутствуют, но наблюдается нарушение толерантности к глюкозе при приеме внутрь или внутривенном введении.
+```{r}
+# Загрузка данных
+data(Diabetes)
+df <- Diabetes
+str(df)
+```
+
+1. ***relwt*** --- относительный вес (отношение фактического веса к ожидаемому весу с учетом роста человека), числовой вектор
+2. ***glufast*** --- уровень глюкозы в плазме крови натощак, числовой вектор
+3. ***glutest*** --- тест уровня глюкозы в плазме, показатель непереносимости глюкозы, числовой вектор
+4. ***instest*** --- уровень инсулина в плазме крови во время теста, показатель реакции инсулина на пероральный глюкозотолерантный тест, числовой вектор
+5. ***sspg*** --- уровень глюкозы в плазме крови после некоторого времери после введения глюкозы, показатель резистентности к инсулину, числовой вектор
+6. ***group*** --- диагностическая группа, фактор с уровнями Normal, Chemical_Diabetic и Overt_Diabetic.
+
+```{r}
+# Описательная статистика
+summary(df)
+```
+
+```{r message=FALSE, fig.width=12, fig.height=8}
+ggpairs(df, columns = 1:5, progress = FALSE)
+```
+
+```{r, fig.width=12, fig.height=8}
+# Прологарифмируем признаки с хвостами
+df <- df |>
+  mutate(
+    glufast = log(glufast),
+    glutest = log(glutest),
+    instest = log(instest),
+    sspg = log(sspg)
+  )
+ggpairs(df, columns = 1:5, progress = FALSE)
+```
+
+# Анализ главных компонент
+```{r}
+pca_res <- PCA(df, ncp = 5, quali.sup = 6, graph = FALSE)
+
+# Собственные числа корреляционной матрицы (вклады компонент)
+fviz_eig(pca_res, choice = "eigenvalue")
+pca_res$eig
+```
+
+Первые две главные компоненты объясняют $>80\%$ дисперсии, оставим только их. 
+```{r}
+# Главные направления
+pca_res$svd$V[, 1:2]
+```
+
+Интерпретируем главные компоненты по главным направлениям:
+
+1. Первая главная компонента соответствует общему состоянию пациента, чем больше значение, тем хуже состояние;
+2. Вторая главная компонента соответствует относительному весу пациента, его инсулинорезистентности и показателю реакции инсулина на введение глюкозы.
+
+```{r}
+# Факторные нагрузки
+pca_res$var$coord[, 1:2]
+```
+
+```{r}
+# Визуальное представление факторных нагрузок
+cols <- c("#00AFBB", "#E7B800", "#FC4E07")
+fviz_pca_var(pca_res, col.var = "coord", gradient.cols = cols, repel = TRUE)
+```
+
+На графике видно, что признаки gluetest и gluefast практически имеют единичную длинну и находятся рядом друг с другом. Это говорит нам о том, что эти признаки между собой положительно коррелируют.
+```{r}
+# Biplot (раскрасим по признаку group)
+fviz_pca_biplot(pca_res, habillage = 6)
+```
+
+На графике первых двух главных компонент видно, что данные разбились на два видимых облачка: более плотное слева от оси $Oy$ и с б\'ольшим разбросом справа.
+
+# Факторный анализ
+Поскольку признаков (без учета group) у нас всего пять, факторный анализ возможно провести только по $2$ факторам. Также данные данные неоднородные, поэтому возьмем только два класса Normal и Chemical_Diabetic.
+
+```{r, fig.width=12, fig.height=8}
+ggpairs(df, aes(colour = group), columns = 1:5, progress = FALSE)
+```
+
+
+## Без поворота
+Сначала проведем факторный анализ без вращений.
+```{r}
+x <- df |>
+  filter(group != "Overt_Diabetic") |>
+  droplevels() |>
+  dplyr::select(-group)
+fa <- factanal(x, 2, scores = "regression", rotation = "none")
+fa
+```
+P-value равен $0.0259$, при уровне значимости $0.01$ нет оснований полагать, что $2$ факторов недостаточно. Уникальность --- доля дисперсии, которая не объясняется факторами. Видно, что полученные факторы хорошо объясняют признаки glutest и sspg, поскольку они имеют маленькую уникальность. Остальные признаки факторы объясняют одинакого не очень.
+
+## Поворот varimax
+```{r}
+fa_varimax <- factanal(x, 2, scores = "regression", rotation = "varimax")
+fa_varimax
+```
+Нарисуем биплот.
+```{r}
+biplot.psych(fa_varimax)
+abline(h = 0, v = 0, lty = 2)
+```
+
+Попытаемся интерпретировать факторы:
+
+1. Первый фактор отвечает за относительный вес человека, его инсулинорезистентность и инсулиновую рекцию на глюкозу.
+2. Второй фактор отвечает за уровень сахара в крови до и во время теста.
+
+## Поворот oblimin (косоугольное вращение)
+При использовании косоугольных вращений важно, чтобы корреляции между факторами были минимальными.
+```{r}
+fa_oblimin <- factanal(
+  x,
+  factors = 2,
+  scores = "regression",
+  rotation = "oblimin"
+)
+fa_oblimin
+```
+Как видно выше, корреляция довольно большая ($0.573$), интерпретировать полученные факторы смысла нет. На биплоте видно, что признаки ssp, gluefast и gluetest стали сонаправленными с ортами в плоскости факторов.
+```{r}
+biplot.psych(fa_oblimin)
+abline(h = 0, v = 0, lty = 2)
+```
+
+# Классификация
+```{r}
+# Вернем группу Overt_Diabetic обратно
+x <- dplyr::select(df, -group)
+
+# Проверяем данные на нормальность
+mvn_test <- MVN::mvn(x, univariateTest = "Lillie")
+mvn_test$univariateNormality$Test <- "Lilliefors"
+mvn_test$univariateNormality
+```
+
+```{r}
+# Multivariate ANOVA, проверка значимости различия в средних
+manova_res <- manova(as.matrix(x) ~ group, data = df)
+
+# Wilks' Lambda
+summary(manova_res, "Wilks")
+
+# Roy's Largest Root
+summary(manova_res, "Roy")
+```
+По критерию MANOVA классы имеют значимо разные векторы средних.
+```{r}
+# Канонический дискриминантный анализ
+ca <- candisc(manova_res)
+summary(ca, coef = "structure")
+```
+
+```{r, message=FALSE}
+plot(ca)
+```
+
+Канонические переменные являются линейными комбинации признаков, которые наилучшим образом различают группы. Стрелочки --- корелляции между признаками и каноническими переменными. Тогда канонические переменные можно интерпретировать следующим образом: первая каноническая переменная соответствует уровню глюкозы индивида (до, во время и после теста), вторая --- относительному весу и реакции инсулина на глюкозу.
+
+## LDA
+```{r}
+# Обучаем LDA на всех данных
+lda_pred <- df |>
+  lda(group ~ ., data = _) |>
+  predict(x)
+```
+
+```{r}
+confusion_matrix <- function(pred, response) {
+  cm <- table(Predicted = pred, Actual = response)
+  print(cm)
+  cat(
+    "\nAccuracy:", sum(diag(cm)) / nrow(df),
+    "\nAccuracy in each class:", diag(prop.table(cm, 2))
+  )
+  invisible(cm)
+}
+```
+
+```{r}
+confusion_matrix(lda_pred$class, df$group)
+```
+Поскольку данных мало, вместо разделения данных на train и test лучше воспользоваться leave-one-out кросс-валидацией.
+```{r}
+# Leave-one-out CV
+lda_cv <- lda(group ~ ., data = df, CV = TRUE)
+```
+
+```{r}
+confusion_matrix(lda_cv$class, df$group)
+```
+
+Пусть теперь пациенты с латентным диабетом являются контрольной группой, посмотрим на качество классификации. 
+```{r}
+df_control <- df |>
+  mutate(control = factor(group == "Chemical_Diabetic", labels = c(0, 1))) |>
+  dplyr::select(-group)
+cat("Proportion of the control group:", mean(df_control$control == 1))
+```
+
+Поскольку нам важно правильно диагностировать латентный диабет, установим одинаковые априорные веса. 
+```{r}
+# Leave-one-out CV на данных с контрольной группой
+lda_control_cv <- lda(
+  control ~ .,
+  data = df_control,
+  prior = c(0.5, 0.5),
+  CV = TRUE
+)
+```
+
+```{r}
+confusion_matrix(lda_control_cv$class, df_control$control)
+```
+
+Теперь построим ROC-кривую.
+```{r}
+# Строим ROC-кривые
+roc_lda <- roc(df_control$control, lda_control_cv$posterior[, 2], quiet = TRUE)
+plot(roc_lda, print.auc = TRUE, legacy.axes = TRUE)
+```
+
+По оси $Ox$ отложена специфичность, по оси $Oy$ --- чувствительность. Специфичность --- доля верно предсказанных отрицательных результатов (1 - FPR), чувствительность --- доля верно предсказанных положительных результатов (TPR). AUC --- площадь под графиком, чем больше, тем лучше классификатор. Получили довольно хороший классификатор.
+
+## QDA
+Проделаем все тоже самое для QDA.
+```{r}
+# Обучаем QDA на всех данных
+qda_pred <- df |>
+  qda(group ~ ., data = _) |>
+  predict(x)
+```
+
+```{r}
+confusion_matrix(qda_pred$class, df$group)
+```
+
+```{r}
+# Leave-one-out CV
+qda_cv <- qda(group ~ ., data = df, CV = TRUE)
+```
+
+```{r}
+confusion_matrix(qda_cv$class, df$group)
+```
+
+```{r}
+# Leave-one-out CV на данных с контрольной группой
+qda_control_cv <- qda(
+  control ~ .,
+  data = df_control,
+  prior = c(0.5, 0.5),
+  CV = TRUE
+)
+```
+
+```{r}
+confusion_matrix(qda_control_cv$class, df_control$control)
+```
+
+```{r}
+# Строим ROC-кривые
+roc_qda <- roc(df_control$control, qda_control_cv$posterior[, 2], quiet = TRUE)
+plot(roc_qda, print.auc = TRUE, legacy.axes = TRUE)
+```
+
+Сравним LDA и QDA.
+```{r}
+plot(
+  roc_lda,
+  col = "red",
+  print.auc = TRUE,
+  legacy.axes = TRUE
+)
+plot(
+  roc_qda,
+  add = TRUE,
+  col = "blue",
+  print.auc = TRUE,
+  print.auc.adj = c(0, 3)
+)
+# Добавляем легенду
+legend(
+  "bottomright",
+  c("LDA", "QDA"),
+  col = c("red", "blue"),
+  lwd = 2,
+  bty = "n"
+)
+```
+
+Выбираем модель с большим AUC --- QDA.
+
+# Кластеризация
+На глаз можно выделить 2 кластера: первый соответствует группам Normal и Chemical_Diabetic, второй --- Overt_diabetic. В качестве внешней оценки качества кластеризации возьмем индекс Adjusted Rand, а в качестве внутренней --- Silhouette.
+
+Перед тем, как применять кластеризацию, стандартизуем признаки.
+```{r, fig.width=12, fig.height=8}
+clust <- df$group
+levels(clust) <- c(1, 1, 2)
+df_scaled <- df |>
+  dplyr::select(-group) |>
+  scale()
+ggpairs(df_scaled, aes(colour = clust), progress = FALSE)
+```
+```{r}
+silhouettes <- list()
+adj_rand <- list()
+d <- dist(df_scaled)
+```
+
+## K-means
+```{r}
+fviz_nbclust(df_scaled, kmeans)
+```
+
+```{r}
+set.seed(4)
+clust_kmeans <- kmeans(df_scaled, 2)
+```
+
+Визуализация k-means clustering:
+```{r, fig.width=12, fig.height=8}
+ggpairs(df_scaled, aes(colour = factor(clust_kmeans$cluster)), progress = FALSE)
+```
+
+Также посмотрим на плоскость первых двух главных компонент
+```{r}
+fviz_cluster(clust_kmeans, df_scaled, ellipse.type = "norm")
+```
+
+```{r}
+silhouettes$kmeans <- mean(silhouette(clust_kmeans$cluster, d)[, 3])
+adj_rand$kmeans <- adjustedRandIndex(clust_kmeans$cluster, clust)
+
+cat(
+  "Silhouette: ", silhouettes$kmeans,
+  "\nAdjusted Rand Index:", adj_rand$kmeans
+)
+```
+
+## Иерархическая кластеризация
+```{r}
+dend <- hclust(d, method = "ward.D") |>
+  as.dendrogram()
+
+# Раскрасим листья
+colors_dend <- as.numeric(clust)
+colors_dend <- colors_dend[order.dendrogram(dend)]
+labels_colors(dend) <- colors_dend
+
+plot(dend, main = "Dendrogram", ylab = "Euclidean distance")
+# Середина максимального расстояния между узлами
+abline(h = 55, lty = 2)
+```
+
+Обычно дерево обрезают по середина максимального расстояния между узлами, т.е. в данном случае остается $2$ кластера. Посмотрим, что скажет Silhouette.
+```{r}
+hclust_results <- c()
+ks <- 2:10
+
+for (i in seq_along(ks)) {
+  hc <- cutree(dend, k = ks[i])
+  hclust_results[i] <- mean(silhouette(hc, d)[, 3])
+}
+
+plot(
+  c(1, ks), c(0, hclust_results),
+  type = "b",
+  xlab = "Number of clusters", ylab = "Silhouette",
+  xaxt = "n"
+)
+axis(1, c(1, ks))
+abline(v = 2, lty = 2)
+```
+
+По Silhouette оптимальное количество кластеров тоже $2$. Визуализируем полученную кластеризации:
+```{r, fig.width=12, fig.height=8}
+clust_hierar <- cutree(dend, k = 2)
+ggpairs(df_scaled, aes(colour = factor(clust_hierar)), progress = FALSE)
+```
+
+```{r}
+fviz_cluster(list(data = df_scaled, cluster = factor(clust_hierar)), ellipse.type = "norm")
+```
+
+```{r}
+silhouettes$hclust <- mean(silhouette(clust_hierar, d)[, 3])
+adj_rand$hclust <- adjustedRandIndex(clust_hierar, clust)
+cat(
+    "Silhouette: ", silhouettes$hclust,
+    "\nAdjusted Rand Index:", adj_rand$hclust
+)
+```
+
+## Модели гауссовских смесей
+```{r}
+mclust_res <- Mclust(df_scaled, 1:10)
+
+# Plot BIC
+plot(mclust_res, what = c("BIC"))
+mclust_res$BIC
+```
+
+Из всех моделей больший BIC имют модели EVV, VEV и EEV с $2$ кластерами. Выбираем модель с меньшим значением параметров --- EEV.
+```{r}
+gmm_eev <- Mclust(df_scaled, 2, "EEV")
+```
+
+Визуализируем полученную кластеризацию. Сначала вглянем на pairs plot.
+```{r, fig.width=12, fig.height=8}
+plot(gmm_eev, what = "classification")
+```
+
+Теперь на плоскость первых двух главных компонент:
+```{r}
+fviz_cluster(gmm_eev, df_scaled, ellipse.type = "norm")
+```
+
+```{r}
+silhouettes$mclust <- mean(silhouette(gmm_eev$classification, d)[, 3])
+adj_rand$mclust <- adjustedRandIndex(gmm_eev$classification, clust)
+cat(
+  "Silhouette: ", silhouettes$mclust,
+  "\nAdjusted Rand Index:", adj_rand$mclust
+)
+```
+
+## Спектральная кластеризация
+Зафиксируем количество кластеров $k=2$.
+```{r}
+spectral_clust <- df_scaled |>
+  t() |>
+  data.frame() |>
+  Spectrum(silent = TRUE, clusteralg = "km", method = 3, fixk = 2)
+```
+
+Визуализируем:
+```{r, fig.width=12, fig.height=8}
+df_scaled |>
+  ggpairs(aes(colour = factor(spectral_clust$assignments)), progress = FALSE)
+```
+
+```{r}
+fviz_cluster(list(data = df_scaled, cluster = spectral_clust$assignments), ellipse.type = "norm")
+```
+
+```{r}
+silhouettes$spec <- mean(silhouette(spectral_clust$assignments, d)[, 3])
+adj_rand$spec <- adjustedRandIndex(spectral_clust$assignments, clust)
+cat(
+  "Silhouette: ", silhouettes$spec,
+  "\nAdjusted Rand Index:", adj_rand$spec
+)
+```
+
+Сравним полученные метрики. 
+```{r}
+data.frame(
+  Silhouette = unlist(silhouettes),
+  AdjustedRand = unlist(adj_rand)
+)
+```
+По внутренней мере оценки качества кластеризации самыми лучшими оказались k-means и иерархическая кластеризация, по внешней мере --- спектральная кластеризация. Худшая по обоим мерам --- модель гауссовских смесей.
+
+# Канонический корреляционный анализ
+Будем рассматривать только однородные данные, то есть опять уберем группу Overt_Diabetic. Выявим зависимость между исходыми данными пациента (его вес и уровень крови натошак) и результатами теста.
+```{r}
+x <- df |>
+  filter(group != "Overt_Diabetic") |>
+  droplevels()
+
+cancor_res <- cancor(
+  x |> dplyr::select(relwt, glufast),
+  x |> dplyr::select(glutest, instest, sspg)
+)
+summary(cancor_res)
+```
+
+```{r}
+# Корреляция между исходными признаками и каноническими переменными
+cancor_res$structure
+```
+
+```{r}
+# Канонические коэффициенты
+coef(cancor_res, type = "both", standardize = TRUE)
+```
+
+```{r}
+# Визуализация многомерной множественной регрессии
+plot(cancor_res)
+plot(cancor_res, which = 2)
+```
+
+# Анализ соответствий
+Рассмотрим данные о зарегистрированных случаях преступлений (за исключением убийств), которые произошли в Чикаго в 2012-2017 гг.
+```{r}
+df_crimes <- read.csv("./data/crimes2012_2017.csv", TRUE, ";")
+str(df_crimes)
+```
+Нас интересуют признаки Primary.Type (вид преступления) и Location.Description (место преступления).
+```{r}
+# Number of unique values
+df_crimes |> summarise_all(n_distinct)
+```
+Поскольку у признаков довольно много уникальных значений, возьмем только первые $10$ самых распространенных.
+```{r}
+crime_type <- df_crimes |>
+  group_by(Primary.Type) |>
+  summarise(count = n()) |>
+  arrange(desc(count)) |>
+  head(10) |>
+  _$Primary.Type
+
+crime_type
+```
+
+```{r}
+crime_loc <- df_crimes |>
+  group_by(Location.Description) |>
+  summarise(count = n()) |>
+  arrange(desc(count)) |>
+  head(10) |>
+  _$Location.Description
+
+crime_loc
+```
+Составим таблицу сопряженности.
+```{r}
+contingency_table <- df_crimes |>
+  dplyr::select(Primary.Type, Location.Description) |>
+  filter(Primary.Type %in% crime_type & Location.Description %in% crime_loc) |>
+  table()
+```
+
+```{r, fig.width=12}
+ca_res <- CA(contingency_table, graph = FALSE)
+get_eigenvalue(ca_res)
+```
+
+```{r}
+fviz_eig(ca_res, addlabels = TRUE)
+```
+
+Первые 2-3 компоненты уже достаточно хорошо (82-92% объясненной дисперсии) описывают данные. Взглянем на биплот первых двух компонент.
+```{r, fig.width=12, fig.height=8}
+fviz_ca_biplot(ca_res)
+```
+
+На биплоте близость столбцов и строк означает положительную связь. По графику видим, что на пешеходных дорогах и переулках происходят кражи и распространение наркотиков; в школах, общенственных местах и зданиях происходят нападения (угрозы физического насилия) и побои; в местах проживания происходят акты мошенничества (видимо, телефонного) и взломы с проникновением.  
