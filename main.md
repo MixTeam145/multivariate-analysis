@@ -23,7 +23,6 @@
 ``` r
 # Подключаем необходимые библиотеки
 library(dplyr)
-library(heplots)
 library(FactoMineR)
 library(factoextra)
 library(GGally)
@@ -55,7 +54,7 @@ library(Spectrum)
 
 ``` r
 # Загрузка данных
-data(Diabetes)
+data(Diabetes, package = "heplots")
 df <- Diabetes
 str(df)
 ```
